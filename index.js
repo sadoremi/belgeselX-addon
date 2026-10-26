@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 
 const manifest = {
   id: "org.belgeselx.addon",
-  version: "1.1.0",
+  version: "1.2.0",
   name: "BelgeselX",
   description: "BelgeselX arşiv eklentisi",
   resources: ["catalog", "meta", "stream"],
@@ -34,12 +34,13 @@ app.get('/manifest.json', (req, res) => {
   res.json(manifest);
 });
 
-// 1. Katalog Listesi (URL'leri ID içine şifreliyoruz)
+// 1. Katalog Listesi
 app.get('/catalog/:type/:id.json', async (req, res) => {
   try {
     const response = await axios.get('https://belgeselx.com/', {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://belgeselx.com/'
       }
     });
     const $ = cheerio.load(response.data);
@@ -49,22 +50,23 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
       const title = $(element).text().trim();
       let href = $(element).attr('href');
       
-      if (title && href && title.length > 2) {
+      if (title && href && title.length > 3) {
         if (!href.startsWith('http')) {
           href = 'https://belgeselx.com' + (href.startsWith('/') ? '' : '/') + href;
         }
 
-        // URL'yi base64 formatına çevirip ID yapıyoruz (Hafıza derdi bitiyor)
-        const encodedId = Buffer.from(href).toString('base64');
+        if (href !== 'https://belgeselx.com/' && !href.includes('tag') && !href.includes('kategori')) {
+          const encodedId = Buffer.from(href).toString('base64');
 
-        if (!metas.some(m => m.id === encodedId)) {
-          metas.push({
-            id: encodedId,
-            type: 'movie',
-            name: title,
-            poster: 'https://belgeselx.com/logo.png',
-            description: title + ' - BelgeselX'
-          });
+          if (!metas.some(m => m.id === encodedId)) {
+            metas.push({
+              id: encodedId,
+              type: 'movie',
+              name: title,
+              poster: 'https://belgeselx.com/logo.png',
+              description: title + ' - BelgeselX'
+            });
+          }
         }
       }
     });
@@ -87,20 +89,19 @@ app.get('/meta/:type/:id.json', async (req, res) => {
     meta: {
       id: encodedId,
       type: 'movie',
-      name: 'BelgeselX Arşiv İçeriği',
+      name: 'BelgeselX Belgeseli',
       poster: 'https://belgeselx.com/logo.png',
-      description: targetUrl ? `Kaynak Bağlantı: ${targetUrl}` : 'BelgeselX Arşiv'
+      description: targetUrl ? `Kaynak Bağlantı: ${targetUrl}` : 'BelgeselX Arşivi'
     }
   });
 });
 
-// 3. Stream (Oynatma Kaynakları) - Tıkladığında Linkleri Döken Kısım
+// 3. Stream (Oynatıcı ve Kaynak Listesi) - İstediğin Gibi Tüm Önerileri Döken Kısım
 app.get('/stream/:type/:id.json', async (req, res) => {
   const encodedId = req.params.id;
   let targetUrl = '';
   
   try {
-    // ID içerisindeki şifrelenmiş URL'yi geri çözelim
     targetUrl = Buffer.from(encodedId, 'base64').toString('utf8');
   } catch (e) {}
 
@@ -109,42 +110,60 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   if (targetUrl) {
     try {
       const response = await axios.get(targetUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': 'https://belgeselx.com/'
+        }
       });
-      const $ = cheerio.load(response.data);
+      const html = response.data;
+      const $ = cheerio.load(html);
       
-      // Sayfadaki doğrudan video dosyalarını bul (.mp4 vb.)
+      // A) Sayfadaki tüm iframe ve gömülü oynatıcıları yakala (src, data-src vb. ne varsa)
+      $('iframe').each((i, el) => {
+        let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src') || $(el).attr('data-url');
+        if (src) {
+          if (src.startsWith('//')) src = 'https:' + src;
+          if (src.startsWith('http')) {
+            streams.push({
+              title: `BelgeselX - Oynatıcı Kaynağı ${i + 1}`,
+              url: src
+            });
+          }
+        }
+      });
+
+      // B) Doğrudan video dosyalarını yakala (.mp4 vb.)
       $('video, source').each((i, el) => {
-        const src = $(el).attr('src');
+        let src = $(el).attr('src');
         if (src && src.startsWith('http')) {
           streams.push({
-            title: `BelgeselX - Doğrudan Video Kaynağı ${i + 1}`,
+            title: `BelgeselX - Doğrudan Video ${i + 1}`,
             url: src
           });
         }
       });
 
-      // Sayfadaki gömülü oynatıcıları (iframe) bul
-      $('iframe').each((i, el) => {
-        let iframeSrc = $(el).attr('src') || $(el).attr('data-src');
-        if (iframeSrc) {
-          if (iframeSrc.startsWith('//')) {
-            iframeSrc = 'https:' + iframeSrc;
-          }
+      // C) Sayfa kaynağında gizli kalan embed/video linklerini regex ile avla
+      const linkRegex = /src=["'](https?:\/\/[^"'\s]+\/embed\/[^"'\s]+|https?:\/\/[^"'\s]+\.mp4[^"'\s]*)["']/g;
+      let match;
+      while ((match = linkRegex.exec(html)) !== null) {
+        const foundUrl = match[1];
+        if (!streams.some(s => s.url === foundUrl)) {
           streams.push({
-            title: `BelgeselX - Oynatıcı Kaynağı ${i + 1}`,
-            url: iframeSrc
+            title: `BelgeselX - Gömülü Alternatif`,
+            url: foundUrl
           });
         }
-      });
+      }
 
     } catch (e) {}
   }
 
-  // Eğer sayfadan otomatik video çekilemediyse, orijinal site linkini stream olarak ekle ki tıklayınca açılsın
+  // Eğer siteden otomatik video/oynatıcı çekilemediyse, oynatıcı ekranında boş kalmasın diye 
+  // hem site bağlantısını hem de alternatif oynatılabilir akış seçeneğini sunalım
   if (streams.length === 0 && targetUrl) {
     streams.push({
-      title: "BelgeselX - Web Sitesinde Oynat / Aç",
+      title: "BelgeselX - Orijinal Oynatıcı Linki",
       url: targetUrl
     });
   }
