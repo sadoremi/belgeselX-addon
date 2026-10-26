@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 
 const manifest = {
   id: "org.belgeselx.addon",
-  version: "1.0.0",
+  version: "1.1.0",
   name: "BelgeselX",
   description: "BelgeselX arşiv eklentisi",
   resources: ["catalog", "meta", "stream"],
@@ -34,9 +34,7 @@ app.get('/manifest.json', (req, res) => {
   res.json(manifest);
 });
 
-let cachedItems = [];
-
-// 1. Katalog Listesini Çek
+// 1. Katalog Listesi (URL'leri ID içine şifreliyoruz)
 app.get('/catalog/:type/:id.json', async (req, res) => {
   try {
     const response = await axios.get('https://belgeselx.com/', {
@@ -45,7 +43,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
       }
     });
     const $ = cheerio.load(response.data);
-    cachedItems = [];
+    const metas = [];
 
     $('a').each((i, element) => {
       const title = $(element).text().trim();
@@ -56,26 +54,20 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
           href = 'https://belgeselx.com' + (href.startsWith('/') ? '' : '/') + href;
         }
 
-        if (!cachedItems.some(item => item.name === title)) {
-          cachedItems.push({
-            id: 'bx_' + i,
+        // URL'yi base64 formatına çevirip ID yapıyoruz (Hafıza derdi bitiyor)
+        const encodedId = Buffer.from(href).toString('base64');
+
+        if (!metas.some(m => m.id === encodedId)) {
+          metas.push({
+            id: encodedId,
             type: 'movie',
             name: title,
             poster: 'https://belgeselx.com/logo.png',
-            description: title + ' - BelgeselX',
-            url: href
+            description: title + ' - BelgeselX'
           });
         }
       }
     });
-
-    const metas = cachedItems.map(item => ({
-      id: item.id,
-      type: item.type,
-      name: item.name,
-      poster: item.poster,
-      description: item.description
-    }));
 
     res.json({ metas: metas.slice(0, 50) });
   } catch (error) {
@@ -83,38 +75,40 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   }
 });
 
-// 2. Detay Sayfası
-app.get('/meta/:type/:id.json', (req, res) => {
-  const id = req.params.id;
-  const item = cachedItems.find(i => i.id === id) || {
-    id: id,
-    type: 'movie',
-    name: 'BelgeselX İçeriği',
-    poster: 'https://belgeselx.com/logo.png',
-    description: 'BelgeselX Arşiv'
-  };
+// 2. Meta (Detay) Sayfası
+app.get('/meta/:type/:id.json', async (req, res) => {
+  const encodedId = req.params.id;
+  let targetUrl = '';
+  try {
+    targetUrl = Buffer.from(encodedId, 'base64').toString('utf8');
+  } catch (e) {}
 
   res.json({
     meta: {
-      id: item.id,
-      type: item.type,
-      name: item.name,
-      poster: item.poster,
-      description: item.description
+      id: encodedId,
+      type: 'movie',
+      name: 'BelgeselX Arşiv İçeriği',
+      poster: 'https://belgeselx.com/logo.png',
+      description: targetUrl ? `Kaynak Bağlantı: ${targetUrl}` : 'BelgeselX Arşiv'
     }
   });
 });
 
-// 3. Çoklu Kaynak (Stream) Tarayıcı - İstediğin Gibi Birden Fazla Link Döker
+// 3. Stream (Oynatma Kaynakları) - Tıkladığında Linkleri Döken Kısım
 app.get('/stream/:type/:id.json', async (req, res) => {
-  const id = req.params.id;
-  const item = cachedItems.find(i => i.id === id);
+  const encodedId = req.params.id;
+  let targetUrl = '';
   
+  try {
+    // ID içerisindeki şifrelenmiş URL'yi geri çözelim
+    targetUrl = Buffer.from(encodedId, 'base64').toString('utf8');
+  } catch (e) {}
+
   let streams = [];
 
-  if (item && item.url) {
+  if (targetUrl) {
     try {
-      const response = await axios.get(item.url, {
+      const response = await axios.get(targetUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
       });
       const $ = cheerio.load(response.data);
@@ -124,13 +118,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         const src = $(el).attr('src');
         if (src && src.startsWith('http')) {
           streams.push({
-            title: `BelgeselX - Doğrudan Kaynak ${i + 1}`,
+            title: `BelgeselX - Doğrudan Video Kaynağı ${i + 1}`,
             url: src
           });
         }
       });
 
-      // Sayfadaki gömülü oynatıcıları (iframe) bul (YouTube, Mail.ru, Ok.ru vb.)
+      // Sayfadaki gömülü oynatıcıları (iframe) bul
       $('iframe').each((i, el) => {
         let iframeSrc = $(el).attr('src') || $(el).attr('data-src');
         if (iframeSrc) {
@@ -138,7 +132,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             iframeSrc = 'https:' + iframeSrc;
           }
           streams.push({
-            title: `BelgeselX Oynatıcı Kaynağı ${i + 1}`,
+            title: `BelgeselX - Oynatıcı Kaynağı ${i + 1}`,
             url: iframeSrc
           });
         }
@@ -147,11 +141,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     } catch (e) {}
   }
 
-  // Eğer sayfadan otomatik video çekilemediyse, belgeselin kendi orijinal web sitesi linkini alternatif kaynak olarak ekle
-  if (streams.length === 0 && item && item.url) {
+  // Eğer sayfadan otomatik video çekilemediyse, orijinal site linkini stream olarak ekle ki tıklayınca açılsın
+  if (streams.length === 0 && targetUrl) {
     streams.push({
-      title: "BelgeselX - Orijinal Web Kaynağı",
-      url: item.url
+      title: "BelgeselX - Web Sitesinde Oynat / Aç",
+      url: targetUrl
     });
   }
 
