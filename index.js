@@ -36,6 +36,7 @@ app.get('/manifest.json', (req, res) => {
 
 let cachedItems = [];
 
+// 1. Katalog Listesini Çek
 app.get('/catalog/:type/:id.json', async (req, res) => {
   try {
     const response = await axios.get('https://belgeselx.com/', {
@@ -82,6 +83,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   }
 });
 
+// 2. Detay Sayfası
 app.get('/meta/:type/:id.json', (req, res) => {
   const id = req.params.id;
   const item = cachedItems.find(i => i.id === id) || {
@@ -103,7 +105,7 @@ app.get('/meta/:type/:id.json', (req, res) => {
   });
 });
 
-// Gelişmiş Kaynak (Stream) Yakalayıcı
+// 3. Çoklu Kaynak (Stream) Tarayıcı - İstediğin Gibi Birden Fazla Link Döker
 app.get('/stream/:type/:id.json', async (req, res) => {
   const id = req.params.id;
   const item = cachedItems.find(i => i.id === id);
@@ -113,43 +115,43 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   if (item && item.url) {
     try {
       const response = await axios.get(item.url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
       });
       const $ = cheerio.load(response.data);
       
-      // Sayfa içerisindeki tüm olası video kaynaklarını arayalım
-      const videoSrc = $('video source').attr('src') || $('video').attr('src');
-      const iframeSrc = $('iframe').attr('src');
-      
-      if (videoSrc) {
-        streams.push({
-          title: "BelgeselX Doğrudan Kaynak",
-          url: videoSrc.startsWith('http') ? videoSrc : 'https://belgeselx.com' + videoSrc
-        });
-      }
-      
-      if (iframeSrc) {
-        streams.push({
-          title: "BelgeselX Oynatıcı (Iframe)",
-          url: iframeSrc
-        });
-      }
+      // Sayfadaki doğrudan video dosyalarını bul (.mp4 vb.)
+      $('video, source').each((i, el) => {
+        const src = $(el).attr('src');
+        if (src && src.startsWith('http')) {
+          streams.push({
+            title: `BelgeselX - Doğrudan Kaynak ${i + 1}`,
+            url: src
+          });
+        }
+      });
+
+      // Sayfadaki gömülü oynatıcıları (iframe) bul (YouTube, Mail.ru, Ok.ru vb.)
+      $('iframe').each((i, el) => {
+        let iframeSrc = $(el).attr('src') || $(el).attr('data-src');
+        if (iframeSrc) {
+          if (iframeSrc.startsWith('//')) {
+            iframeSrc = 'https:' + iframeSrc;
+          }
+          streams.push({
+            title: `BelgeselX Oynatıcı Kaynağı ${i + 1}`,
+            url: iframeSrc
+          });
+        }
+      });
+
     } catch (e) {}
   }
 
-  // Eğer siteden otomatik çekemezsek, alternatif olarak orijinal site linkini stream olarak verelim ki tıklayınca açılsın
+  // Eğer sayfadan otomatik video çekilemediyse, belgeselin kendi orijinal web sitesi linkini alternatif kaynak olarak ekle
   if (streams.length === 0 && item && item.url) {
     streams.push({
-      title: "Tarayıcıda / Sitede Aç",
+      title: "BelgeselX - Orijinal Web Kaynağı",
       url: item.url
-    });
-  }
-
-  // Hiçbiri olmazsa en azından test kaynağı dönsün
-  if (streams.length === 0) {
-    streams.push({
-      title: "BelgeselX Alternatif Kaynak",
-      url: "https://www.w3schools.com/html/mov_bbb.mp4"
     });
   }
 
